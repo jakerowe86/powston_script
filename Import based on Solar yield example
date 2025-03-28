@@ -1,0 +1,88 @@
+
+
+# Static load profile for the day (kWh per hour)
+static_load_profile = [0.5, 0.5, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 4.0,
+                       4.0, 4.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                       1.0, 1.0, 1.0, 1.0]  # Example hourly load profile
+
+
+# Import Logic During Charging Window (12 AM to 4 PM)
+if action == "auto" and 0 <= hour < 16:
+
+    required_energy_kwh = (TARGET_SOC_IMPORT - battery_soc) / 100 * BATTERY_CAPACITY
+
+    # Adjust required energy to account for static load
+    current_hour = interval_time.hour
+    remaining_load_kwh = sum(static_load_profile[current_hour:16])  # Load from now until 4 PM
+    adjusted_required_energy_kwh = required_energy_kwh + remaining_load_kwh
+
+    # Calculate required hours and intervals
+    required_hours = adjusted_required_energy_kwh / INVERTER_CAPACITY
+    required_intervals = int(required_hours * 2)  # Convert hours to 30-minute intervals
+
+    # Target end time is 4 PM on the same day (16:00)
+    end_time = interval_time.replace(hour=16, minute=0, second=0, microsecond=0)
+    # Calculate the remaining time in minutes
+    remaining_minutes = int((end_time - interval_time).total_seconds() / 60)
+    # Number of 30-minute intervals
+    intervals = remaining_minutes // 30
+
+    # Adjust required energy based on expected solar yield
+    if weather_data and "hourly" in weather_data:
+        hourly_irradiance = weather_data["hourly"].get("global_tilted_irradiance_instant", [])
+        # Extract relevant irradiance values for the remaining intervals
+        solar_yield_estimate = sum(hourly_irradiance[hour:hour + int(intervals / 2) + 1]) * INVERTER_CAPACITY / 1000  # Convert W/m² to kWh
+        adjusted_required_energy_kwh = max(0, adjusted_required_energy_kwh - solar_yield_estimate)
+
+        # Update required hours and intervals based on adjusted energy
+        required_hours = adjusted_required_energy_kwh / INVERTER_CAPACITY
+        required_intervals = int(required_hours * 2)
+
+    if adjusted_required_energy_kwh > 0:
+
+        # Use buy forecast for price optimization
+        if buy_forecast and len(buy_forecast) > 0:
+            forecast_prices = sorted(buy_forecast[:int(intervals) + 1])
+            required_prices = forecast_prices[:int(required_intervals)+1]
+            max_price_for_required_intervals = max(forecast_prices[:int(required_intervals)+1]) + 0.1 if required_prices else 0  # Use average
+            if buy_price <= max_price_for_required_intervals:
+                if battery_soc > 95:
+                    action = "charge"
+                    reason = (
+                        f"Charging to reach {TARGET_SOC_IMPORT}% SOC. SOC: {battery_soc}%. "
+                        f"Required energy: {required_energy_kwh:.2f} kWh, Required hours: {required_hours:.1f}. "
+                        f"Current price: {buy_price}c, max price: {max_price_for_required_intervals:.2f}c. "
+                        f"solar_yield_estimate: {solar_yield_estimate}kwh. remaining_load_kwh: {remaining_load_kwh}kwh. "
+                        f"adjusted_required_energy_kwh: {adjusted_required_energy_kwh}kwh."
+                    )
+                else:
+                    action = "import"
+                    reason = (
+                        f"Importing to reach {TARGET_SOC_IMPORT}% SOC. SOC: {battery_soc}%. "
+                        f"Required energy: {required_energy_kwh:.2f} kWh, Required hours: {required_hours:.1f}. "
+                        f"Current price: {buy_price}c, max price: {max_price_for_required_intervals:.2f}c. "
+                        f"solar_yield_estimate: {solar_yield_estimate}kwh. remaining_load_kwh: {remaining_load_kwh}kwh. "
+                        f"adjusted_required_energy_kwh: {adjusted_required_energy_kwh}kwh."
+                    )
+            else:
+                reason = (
+                    f"Delayed import: waiting for lower price. "
+                    f"Required energy: {required_energy_kwh:.2f} kWh, Required hours: {required_hours:.1f}. "
+                    f"Current price: {buy_price}c, max price: {max_price_for_required_intervals:.2f}c. "
+                    f"solar_yield_estimate: {solar_yield_estimate}kwh. remaining_load_kwh: {remaining_load_kwh}kwh. "
+                    f"adjusted_required_energy_kwh: {adjusted_required_energy_kwh}kwh."
+                )
+
+        else:
+            if buy_price <= PRICE_THRESHOLD_IMPORT:
+                action = "import"
+                reason = (
+                    f"Importing to reach {TARGET_SOC_IMPORT}% SOC. No forecast available. "
+                    f"SOC: {battery_soc}%. Required energy: {required_energy_kwh:.2f} kWh. "
+                    f"Current price: {buy_price}c, Threshold: {PRICE_THRESHOLD_IMPORT}c."
+                )
+            else:
+                reason = f"Delayed import: price too high ({buy_price}c > {PRICE_THRESHOLD_IMPORT}c)."
+
+
+
